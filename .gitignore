@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Generated / local data — re-fetched from Wikipedia on demand
+vnl_cache.json
+
+# Personal manual fixture overrides
+vnl_fixtures_override.json
