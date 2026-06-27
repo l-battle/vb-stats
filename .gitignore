@@ -6,3 +6,4 @@ vnl_cache.json
 
 # Personal manual fixture overrides
 vnl_fixtures_override.json
+.claude/
