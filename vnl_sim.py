@@ -22,20 +22,57 @@ Run:  python3 vnl_sim.py        # prints a projection using live/cached data
 """
 
 import random
+import statistics
 from collections import defaultdict
 
 QUALIFY = 8          # 8 teams reach the Finals
 HOST = "China"       # host gets a guaranteed berth (8th seed if outside the top 8)
 ELO_SCALE = 400      # logistic scale: smaller -> bigger favourites
 RATING_SPREAD = 1000  # turns point ratio into an Elo-style rating
+PRIOR_K = 8          # shrinkage strength: blend weight is played/(played+K); 0 disables
 
 
 # ---------------------------------------------------------------------------
 # Strength model
 # ---------------------------------------------------------------------------
-def build_ratings(standings, spread=RATING_SPREAD):
-    """Point ratio of 1.00 == 0 Elo; >1 stronger, <1 weaker."""
-    return {t: (s["pr"] - 1.0) * spread for t, s in standings.items()}
+def build_ratings(standings, spread=RATING_SPREAD, prior_points=None, prior_k=PRIOR_K):
+    """Elo-style rating per team. The in-season component is point ratio of 1.00 == 0,
+    >1 stronger, <1 weaker.
+
+    If `prior_points` (e.g. FIVB world-ranking points from vnl_history) is given and
+    `prior_k > 0`, blend in that historical prior by shrinkage:
+
+        rating = w * in_season + (1 - w) * prior,   w = played / (played + prior_k)
+
+    so a team leans on history early (few games) and on current form later. The prior
+    is rescaled to the in-season rating's spread first, so the blend is apples-to-apples.
+    Teams missing from `prior_points` keep their pure in-season rating.
+    """
+    in_raw = {t: standings[t]["pr"] - 1.0 for t in standings}
+    in_rating = {t: in_raw[t] * spread for t in standings}
+    if not prior_points or prior_k <= 0:
+        return in_rating
+
+    common = [t for t in standings if t in prior_points]
+    if not common:
+        return in_rating
+
+    mean_pts = sum(prior_points[t] for t in common) / len(common)
+    prior_raw = {t: prior_points[t] / mean_pts - 1.0 for t in common}
+    # Match the prior's spread to the in-season spread so neither source dominates.
+    s_in = statistics.pstdev([in_raw[t] for t in common]) or 1e-9
+    s_pr = statistics.pstdev(list(prior_raw.values())) or 1e-9
+    factor = s_in / s_pr
+
+    ratings = {}
+    for t in standings:
+        if t in prior_raw:
+            played = standings[t]["played"]
+            w = played / (played + prior_k)
+            ratings[t] = w * in_rating[t] + (1 - w) * prior_raw[t] * factor * spread
+        else:
+            ratings[t] = in_rating[t]
+    return ratings
 
 
 def win_prob(ratings, a, b, scale=ELO_SCALE):
@@ -131,11 +168,12 @@ def qualifiers(ranked, host=HOST, qualify=QUALIFY):
 # Monte Carlo
 # ---------------------------------------------------------------------------
 def simulate(standings, fixtures, n_sims=20000, elo_scale=ELO_SCALE,
-             spread=RATING_SPREAD, host=HOST, qualify=QUALIFY, seed=None):
+             spread=RATING_SPREAD, host=HOST, qualify=QUALIFY, seed=None,
+             prior_points=None, prior_k=PRIOR_K):
     """Run the Monte Carlo and return a results dict keyed by team."""
     if seed is not None:
         random.seed(seed)
-    ratings = build_ratings(standings, spread)
+    ratings = build_ratings(standings, spread, prior_points, prior_k)
     teams = list(standings)
 
     qual_count = defaultdict(int)
@@ -229,8 +267,19 @@ def print_report(standings, results, n_sims):
 
 if __name__ == "__main__":
     from vnl_data import load_data
+    from vnl_history import load_world_ranking
+
     data = load_data()
     print(f"(data source: {data['source']}, fetched {data['fetched_at']}, "
-          f"{len(data['fixtures'])} remaining fixtures)\n")
-    res = simulate(data["standings"], data["fixtures"], n_sims=20000, seed=42)
+          f"{len(data['fixtures'])} remaining fixtures)")
+    try:
+        hist = load_world_ranking()
+        prior = hist["points"]
+        print(f"(history prior: world ranking {hist['as_of']}, K={PRIOR_K})\n")
+    except Exception as exc:
+        prior = None
+        print(f"(history prior unavailable: {exc})\n")
+
+    res = simulate(data["standings"], data["fixtures"], n_sims=20000, seed=42,
+                   prior_points=prior)
     print_report(data["standings"], res, 20000)

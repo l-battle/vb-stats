@@ -16,6 +16,7 @@ import sys
 
 import vnl_sim as engine
 from vnl_data import load_data
+from vnl_history import load_world_ranking
 
 
 class Session:
@@ -32,13 +33,36 @@ class Session:
         self.elo_scale = engine.ELO_SCALE
         self.spread = engine.RATING_SPREAD
         self.last_results = None
+        # Historical strength prior (FIVB world ranking).
+        self.prior_points = None
+        self.prior_as_of = ""
+        self.prior_source = "unavailable"
+        self.prior_k = engine.PRIOR_K
 
     def load(self, refresh=False):
         data = load_data(refresh=refresh)
         self.meta = {"source": data["source"], "fetched_at": data["fetched_at"]}
         self.base_standings = data["standings"]
         self.base_fixtures = [tuple(f) for f in data["fixtures"]]
+        self._load_history(refresh=refresh)
         self._rebuild()
+
+    def _load_history(self, refresh=False):
+        """Load the world-ranking prior; degrade gracefully if it's unavailable."""
+        try:
+            hist = load_world_ranking(refresh=refresh)
+            self.prior_points = hist["points"]
+            self.prior_as_of = hist["as_of"]
+            self.prior_source = hist["source"]
+        except Exception as exc:
+            self.prior_points = None
+            self.prior_source = "unavailable"
+            print(f"[warn] historical prior unavailable ({exc}); "
+                  f"using in-season form only.")
+
+    @property
+    def prior_active(self):
+        return bool(self.prior_points) and self.prior_k > 0
 
     def _rebuild(self):
         """Re-derive working standings/fixtures from base + applied what-ifs."""
@@ -92,11 +116,17 @@ def show_standings(sess):
 
 
 def run_sim(sess):
+    if sess.prior_active:
+        prior_note = f"history prior ON ({sess.prior_as_of}, K={sess.prior_k})"
+    else:
+        prior_note = "history prior OFF (in-season form only)"
     print(f"\nRunning {sess.n_sims:,} simulations "
-          f"(Elo scale={sess.elo_scale}, {len(sess.fixtures)} fixtures left)...")
+          f"(Elo scale={sess.elo_scale}, {len(sess.fixtures)} fixtures left)")
+    print(f"  {prior_note}...")
     sess.last_results = engine.simulate(
         sess.standings, sess.fixtures, n_sims=sess.n_sims,
         elo_scale=sess.elo_scale, spread=sess.spread,
+        prior_points=sess.prior_points, prior_k=sess.prior_k,
     )
     print()
     engine.print_report(sess.standings, sess.last_results, sess.n_sims)
@@ -159,10 +189,14 @@ def whatif(sess):
 
 
 def tweak(sess):
+    prior = "n/a" if not sess.prior_points else (
+        f"K={sess.prior_k} ({'on' if sess.prior_active else 'off'})")
     print(f"\nCurrent model: simulations={sess.n_sims:,}  Elo scale={sess.elo_scale}  "
-          f"rating spread={sess.spread}")
+          f"rating spread={sess.spread}  history prior {prior}")
     print("  (Elo scale: smaller -> bigger favourites. Spread: how strongly point "
-          "ratio maps to strength.)")
+          "ratio maps to strength.")
+    print("   History prior K: shrinkage toward world-ranking history; higher = lean "
+          "on history longer, 0 = off.)")
     raw = input(f"New simulation count [{sess.n_sims}]: ").strip()
     if raw:
         try:
@@ -181,8 +215,16 @@ def tweak(sess):
             sess.spread = float(raw)
         except ValueError:
             print("  ignored (not a number)")
+    if sess.prior_points:
+        raw = input(f"New history prior K (0 = off) [{sess.prior_k}]: ").strip()
+        if raw:
+            try:
+                sess.prior_k = max(0.0, float(raw))
+            except ValueError:
+                print("  ignored (not a number)")
     print(f"Model now: simulations={sess.n_sims:,}  Elo scale={sess.elo_scale}  "
-          f"rating spread={sess.spread}")
+          f"rating spread={sess.spread}  history prior K={sess.prior_k} "
+          f"({'on' if sess.prior_active else 'off'})")
 
 
 MENU = """
@@ -191,7 +233,7 @@ MENU = """
   2. Run qualification simulation
   3. What-if: set a hypothetical result and re-run
   4. Reset what-if results
-  5. Tweak model (simulations, Elo scale)
+  5. Tweak model (simulations, Elo scale, history weight)
   6. Refresh data from the web
   0. Quit
 =========================================================="""
@@ -207,6 +249,9 @@ def main():
         return 1
     print(f"Loaded {len(sess.standings)} teams, {len(sess.fixtures)} remaining "
           f"fixtures (source: {sess.meta['source']}).")
+    if sess.prior_active:
+        print(f"History prior: world ranking {sess.prior_as_of} "
+              f"(source: {sess.prior_source}, K={sess.prior_k}).")
 
     actions = {
         "1": lambda: show_standings(sess),
